@@ -1,0 +1,58 @@
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Локальные логи и дампы прошивок/памяти
+pc/logs/*.log
+!pc/logs/.gitkeep
+pc/dumps/
+
+# Локальные настройки пользователя (создан settings.json.example)
+pc/settings.json
+
+# САПР и 3D (FreeCAD, КОМПАС-3D и др.)
+*.FCBak
+*.FCStd1
+*.FCStd2
+*.FCBak?
+*.~*
+~$*
+*.bak
+*.tmp
+*.temp
+
+# IDE и редакторы
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+Thumbs.db
+[Dd]esktop.ini
