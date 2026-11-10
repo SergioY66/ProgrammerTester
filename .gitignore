@@ -33,6 +33,7 @@ wheels/
 pc/logs/*.log
 !pc/logs/.gitkeep
 pc/dumps/
+pc/sniffer/
 
 # Локальные настройки пользователя (создан settings.json.example)
 pc/settings.json

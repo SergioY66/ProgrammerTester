@@ -20,6 +20,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SETTINGS = os.path.join(HERE, "settings.json")
 LOG_DIR = os.path.join(HERE, "logs")
 
+SNIFF_DIR = os.path.join(HERE, "sniffer")
 PRODUCTS = {"card": "Карта Flash", "chip": "Чип Zoom", "head": "Голова (AT89S8253)"}
 
 # Nano держит режим «управление с ПК», пока раз в 5 с приходит хоть один пакет
@@ -439,6 +440,17 @@ class App:
         self.run("Дамп головы" if self.product.get() == "head" else "Дамп чипа",
                  job, counted=False, ok_text="ДАМП СНЯТ")
 
+    def _sniff_folder(self) -> str:
+        """Новая папка pc/sniffer/sniff_<время>/ — захват никогда не перезаписывается."""
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        folder = os.path.join(SNIFF_DIR, f"sniff_{stamp}")
+        n = 1
+        while os.path.exists(folder):
+            n += 1
+            folder = os.path.join(SNIFF_DIR, f"sniff_{stamp}_{n}")
+        os.makedirs(folder)
+        return folder
+
     def do_sniff(self):
         """Пассивный сниффер 1-Wire (Y-переходник на X2): идёт, пока не нажата «Стоп»."""
         self.sniff_stop_evt.clear()
@@ -446,17 +458,31 @@ class App:
 
         def job(product, img, charge, log, progress):
             dec = SniffDecoder(detail=detail)
-            self.dev.sniff_start()
-            log("Сниффер запущен. Голова — чип — Nano на одной линии DQ; «Стоп» — остановить.")
-            try:
-                while not self.sniff_stop_evt.is_set():
-                    for text in dec.feed(self.dev.sniff_read()) + dec.idle():
+            folder = self._sniff_folder()
+            # пишем по ходу захвата и с flush: при обрыве USB пойманное сохранится
+            with open(os.path.join(folder, "raw.bin"), "wb") as raw, \
+                    open(os.path.join(folder, "log.txt"), "w", encoding="utf-8") as txt:
+                def out(lines):
+                    for text in lines:
                         log(text)
-            finally:
-                tail = self.dev.sniff_stop()
-                for text in dec.feed(tail) + dec.flush():
-                    log(text)
+                        txt.write(text + "\n")
+                    txt.flush()
+
+                self.dev.sniff_start()
+                log(f"Сниффер запущен, запись в {folder}")
+                log("Голова — чип — Nano на одной линии DQ; «Стоп» — остановить.")
+                try:
+                    while not self.sniff_stop_evt.is_set():
+                        data = self.dev.sniff_read()
+                        raw.write(data)
+                        raw.flush()
+                        out(dec.feed(data) + dec.idle())
+                finally:
+                    tail = self.dev.sniff_stop()
+                    raw.write(tail)
+                    out(dec.feed(tail) + dec.flush())
             log("Сниффер остановлен.")
+            log(f"Сохранено: {folder}", "ok")
         self.run("Сниффер", job, counted=False, ok_text="СТОП")
 
     def on_close(self):
