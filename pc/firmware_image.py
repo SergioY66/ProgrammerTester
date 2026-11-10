@@ -18,6 +18,10 @@ FUSE_LMA = 0x820000
 LOCK_LMA = 0x830000
 SIG_LMA = 0x840000
 USERSIG_LMA = 0x850000
+RAM_BASE_TO_SIG = {
+    0x3E00: bytes([0x1E, 0x93, 0x21]),   # ATtiny816
+    0x3800: bytes([0x1E, 0x94, 0x21]),   # ATtiny1616
+}
 
 
 @dataclass
@@ -29,6 +33,8 @@ class FirmwareImage:
     lock: int | None = None
     signature: bytes | None = None                   # SIGNATURE0, 1, 2 (1E 93 21)
     warnings: list = field(default_factory=list)
+    ram_base: int | None = None                      # начало RAM по секции .data (0x3800 / 0x3E00)
+    sig_inferred: bool = False                      # сигнатура выведена по адресу RAM, а не из .signature
 
     @property
     def has_fuses(self) -> bool:
@@ -88,8 +94,16 @@ def _load_elf(path: str, data: bytes) -> FirmwareImage:
                 break
         body = data[sh_offset:sh_offset + sh_size]
         _place(img, name, lma, body, flash_chunks)
+        if 0x800000 <= sh_addr < 0x810000:           # SRAM: .data/.bss
+            ram_base = sh_addr - 0x800000
+            if img.ram_base is None or ram_base < img.ram_base:
+                img.ram_base = ram_base
 
     _build_flash(img, flash_chunks)
+    # Без .signature чип определяем по началу RAM: ATtiny1616 — 2 КБ (0x3800), ATtiny816 — 512 Б (0x3E00)
+    if img.signature is None and img.ram_base in RAM_BASE_TO_SIG:
+        img.signature = RAM_BASE_TO_SIG[img.ram_base]
+        img.sig_inferred = True
     return img
 
 

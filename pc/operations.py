@@ -80,7 +80,7 @@ def describe(img: FirmwareImage) -> str:
     parts.append(f"lock {img.lock:02X}" if img.lock is not None else "lock нет")
     if img.signature:
         name = DEVICES.get(img.signature, ("?",))[0]
-        parts.append(f"для {name}")
+        parts.append(f"для {name}" + (" (по RAM)" if img.sig_inferred else ""))
     return " · ".join(parts)
 
 
@@ -125,7 +125,8 @@ def program(dev: Device, img: FirmwareImage, log, progress):
         sig, flash_size, ee_size = _identify(dev, log)
         if img.signature and img.signature != sig:
             raise Abort(f"Прошивка собрана для {DEVICES.get(img.signature, ('?',))[0]} "
-                        f"({hexs(img.signature)}), а в разъёме {DEVICES[sig][0]}")
+                        f"({hexs(img.signature)}{', по адресу RAM' if img.sig_inferred else ''}), "
+                        f"а в разъёме {DEVICES[sig][0]}")
         if len(img.flash) > flash_size:
             raise Abort(f"Прошивка {len(img.flash)} Б больше Flash {flash_size} Б")
         if img.eeprom and max(img.eeprom) >= ee_size:
