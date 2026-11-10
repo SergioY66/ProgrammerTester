@@ -4,6 +4,8 @@ log(text, tag) — tag: None, "ok", "warn", "err", "head".
 progress(доля 0…1).
 """
 
+import datetime
+import os
 import time
 
 from device import Device, ST_OW_DIFF
@@ -274,3 +276,64 @@ def test_chip(dev: Device, log, charge_ms: int):
     if errors:
         raise Abort("Тест чипа не пройден: " + "; ".join(errors))
     log("Тест чипа пройден: ROM, CRC8 и память в порядке", "ok")
+
+
+DUMP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dumps")
+
+
+def _hexdump(data: bytes) -> str:
+    return "\n".join(f"{a:02X}: {hexs(data[a:a + 16])}" for a in range(0, len(data), 16)) + "\n"
+
+
+def dump_chip(dev: Device, log, charge_ms: int) -> str:
+    """Читает ROM и память чипа Zoom (1-Wire) и сохраняет в dumps/chip_<время>_<ROM>/.
+
+    Чип не бракуется: дамп снимают и с привязанных чипов, которые от нового отличаются.
+    Возвращает путь к папке дампа.
+    """
+    log(f"Дамп чипа (паразитное питание, зарядка {charge_ms} мс)", "head")
+    status, rom, mem = dev.chip_test(charge_ms)
+    log(f"ROM: {hexs(rom)}")
+    notes = []
+    if status == ST_OW_DIFF:
+        notes.append("два чтения не совпали — дамп ненадёжен")
+    if rom[0] != 0xAD:
+        notes.append(f"код семейства {rom[0]:02X} вместо AD")
+    if _crc8(rom[:7]) != rom[7]:
+        notes.append("CRC8 ROM неверна")
+    diff = [a for a in range(len(CHIP_EXPECTED)) if mem[a] != CHIP_EXPECTED[a]]
+    for row in range(0, len(mem), 16):             # содержимое памяти на экран; отличия от нового чипа — жёлтым
+        bad = any(row <= a < row + 16 for a in diff)
+        log(f"  {row:02X}: {hexs(mem[row:row + 16])}", "warn" if bad else None)
+
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    rom_id = rom[0:7].hex().upper()          # код семейства + 6 байт серийного номера, без CRC
+    folder = os.path.join(DUMP_DIR, f"chip_{stamp}_{rom_id}")
+    n = 1
+    while os.path.exists(folder):                  # дамп не перезаписывается никогда
+        n += 1
+        folder = os.path.join(DUMP_DIR, f"chip_{stamp}_{rom_id}_{n}")
+    os.makedirs(folder)
+    with open(os.path.join(folder, "rom.bin"), "wb") as f:
+        f.write(rom)
+    with open(os.path.join(folder, "mem.bin"), "wb") as f:
+        f.write(mem)
+    with open(os.path.join(folder, "mem.txt"), "w", encoding="utf-8") as f:
+        f.write(_hexdump(mem))
+    with open(os.path.join(folder, "info.txt"), "w", encoding="utf-8") as f:
+        f.write(f"Чип Zoom (1-Wire), дамп {stamp}\n")
+        f.write(f"ROM: {hexs(rom)}\n")
+        f.write(f"Память: 0x00–0x{len(mem) - 1:02X} ({len(mem)} Б), зарядка {charge_ms} мс\n")
+        if diff:
+            f.write(f"Отличается от нового чипа в {len(diff)} байтах: "
+                    + " ".join(f"{a:02X}" for a in diff) + "\n")
+        else:
+            f.write("Совпадает с памятью нового (непривязанного) чипа\n")
+        for note in notes:
+            f.write(f"Внимание: {note}\n")
+    for note in notes:
+        log(note, "warn")
+    log("Память совпадает с новым чипом" if not diff
+        else f"Память отличается от нового чипа в {len(diff)} байтах (чип привязан или использовался)")
+    log(f"Дамп сохранён: {folder}", "ok")
+    return folder

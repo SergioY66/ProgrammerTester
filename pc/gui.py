@@ -102,7 +102,7 @@ class App:
                                 ("Только прошить", self.do_program, "card chip"),
                                 ("Только тест", self.do_test, "card chip"),
                                 ("Состояние чипа", self.do_status, "card chip head"),
-                                ("Снять дамп", self.do_dump, "head"),
+                                ("Снять дамп", self.do_dump, "chip head"),
                                 ("Сниффер 1-Wire", self.do_sniff, "card chip head")):
             b = ttk.Button(act, text=text, command=fn)
             b.pack(side="left", padx=(0, 6), ipady=4)
@@ -432,8 +432,12 @@ class App:
 
     def do_dump(self):
         def job(product, img, charge, log, progress):
-            head89.dump(self.dev, log, progress)
-        self.run("Дамп головы", job, counted=False, ok_text="ДАМП СНЯТ")
+            if product == "head":
+                head89.dump(self.dev, log, progress)
+            else:
+                ops.dump_chip(self.dev, log, charge)
+        self.run("Дамп головы" if self.product.get() == "head" else "Дамп чипа",
+                 job, counted=False, ok_text="ДАМП СНЯТ")
 
     def do_sniff(self):
         """Пассивный сниффер 1-Wire (Y-переходник на X2): идёт, пока не нажата «Стоп»."""
