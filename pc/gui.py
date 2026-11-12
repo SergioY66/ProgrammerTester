@@ -13,6 +13,7 @@ from tkinter.scrolledtext import ScrolledText
 import firmware_image
 import head89
 import operations as ops
+import sniffview
 from device import Device, DeviceError, list_ports
 from sniffdecode import SniffDecoder
 
@@ -110,6 +111,7 @@ class App:
             self.buttons.append((b, where.split()))
         self.sniff_stop_evt = threading.Event()
         ttk.Button(act, text="Стоп", command=self.sniff_stop_evt.set).pack(side="left", padx=(0, 6), ipady=4)
+        ttk.Button(act, text="Визуализатор…", command=self.do_viewer).pack(side="left", padx=(0, 6), ipady=4)
         self.sniff_detail = tk.BooleanVar(value=False)
         ttk.Checkbutton(act, text="тайминги слотов", variable=self.sniff_detail).pack(side="left")
         ttk.Button(act, text="Сбросить счёт", command=self.reset_stats).pack(side="right")
@@ -484,6 +486,18 @@ class App:
             log("Сниффер остановлен.")
             log(f"Сохранено: {folder}", "ok")
         self.run("Сниффер", job, counted=False, ok_text="СТОП")
+
+    def do_viewer(self):
+        """Визуализатор сырых данных сниффера — отдельным окном, без связи с Nano."""
+        win = tk.Toplevel(self.root)
+        last = self.cfg.get("sniff_last", "")
+        path = last if last and os.path.exists(last) else None
+
+        def remember(p):
+            self.cfg["sniff_last"] = p
+            self.save_settings()
+
+        sniffview.Viewer(win, path, on_open=remember)
 
     def on_close(self):
         if self.busy:
