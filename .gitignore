@@ -34,6 +34,7 @@ pc/logs/*.log
 !pc/logs/.gitkeep
 pc/dumps/
 pc/sniffer/
+pc/keys/
 
 # Локальные настройки пользователя (создан settings.json.example)
 pc/settings.json

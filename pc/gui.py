@@ -7,7 +7,7 @@ import queue
 import sys
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter.scrolledtext import ScrolledText
 
 import firmware_image
@@ -85,13 +85,7 @@ class App:
         self.file_var = tk.StringVar()
         ttk.Entry(row, textvariable=self.file_var, state="readonly").pack(side="left", fill="x", expand=True, padx=4)
         ttk.Button(row, text="Выбрать…", command=self.choose_file).pack(side="left")
-        # EEPROM головы: коэффициенты и настройки. Стирание AT89 стирает и её
-        self.ee_row = ttk.Frame(prod)
-        ttk.Label(self.ee_row, text="EEPROM:").pack(side="left")
-        self.ee_var = tk.StringVar()
-        ttk.Entry(self.ee_row, textvariable=self.ee_var, state="readonly").pack(side="left", fill="x", expand=True, padx=4)
-        ttk.Button(self.ee_row, text="Выбрать…", command=self.choose_eeprom).pack(side="left")
-        ttk.Button(self.ee_row, text="Убрать", command=lambda: self.set_eeprom("")).pack(side="left", padx=(4, 0))
+        # EEPROM головы формирует программа (head89.build_eeprom) — файл не выбирается
         self.lbl_file = ttk.Label(prod, text="", foreground="gray")
         self.lbl_file.pack(fill="x", padx=6, pady=(0, 6))
 
@@ -211,11 +205,6 @@ class App:
         self.update_buttons()
 
     def on_product(self):
-        if self.product.get() == "head":
-            self.ee_row.pack(fill="x", padx=6, pady=(0, 4), before=self.lbl_file)
-        else:
-            self.ee_row.pack_forget()
-        self.ee_var.set(self.files.get("head_eeprom", ""))
         path = self.files.get(self.product.get(), "")
         self.file_var.set(path)
         self.load_image(path)
@@ -235,38 +224,16 @@ class App:
             return
         self.files[self.product.get()] = path
         self.file_var.set(path)
-        if head:
-            ee = head89.find_eeprom_for(path)        # flash.bin из дампа — EEPROM того же дампа
-            if ee:
-                self.files["head_eeprom"] = ee
-                self.ee_var.set(ee)
-                self.log(f"EEPROM взята из того же дампа: {ee}")
         self.load_image(path)
-        self.save_settings()
-
-    def choose_eeprom(self):
-        cur = self.ee_var.get() or self.file_var.get()
-        path = filedialog.askopenfilename(
-            title="EEPROM головы",
-            initialdir=os.path.dirname(cur) if cur else head89.DUMP_DIR,
-            filetypes=[("EEPROM", "*.bin *.hex"), ("Все файлы", "*.*")])
-        if path:
-            self.set_eeprom(path)
-
-    def set_eeprom(self, path):
-        self.files["head_eeprom"] = path
-        self.ee_var.set(path)
-        self.load_image(self.file_var.get())
         self.save_settings()
 
     def load_head_image(self, path):
         flash = head89.load_image(path, head89.FLASH_SIZE, "Flash")
-        ee_path = self.files.get("head_eeprom", "")
-        eeprom = head89.load_image(ee_path, head89.EEPROM_SIZE, "EEPROM") if ee_path else None
-        text = f"Flash {head89.used(flash)} Б"
-        text += f" · EEPROM {head89.used(eeprom)} Б" if eeprom is not None else " · EEPROM НЕ ЗАДАНА — будет стёрта"
-        self.images["head"] = (flash, eeprom)
-        self.lbl_file.config(text=text, foreground="black" if eeprom is not None else "#b35c00")
+        self.images["head"] = flash
+        self.lbl_file.config(
+            text=f"Flash {head89.used(flash)} Б · EEPROM формирует программа: коэффициенты "
+                 f"{head89.COEF_LO}/{head89.COEF_MID}/{head89.COEF_HI}, наработка, новый ключ",
+            foreground="black")
 
     def load_image(self, path):
         self.images.pop(self.product.get(), None)
@@ -400,11 +367,30 @@ class App:
         else:
             ops.test_chip(self.dev, log, charge)
 
+    def ask_runtime(self):
+        """Наработка для EEPROM головы, минуты; None — оператор отменил прошивку."""
+        hours = simpledialog.askinteger(
+            "Наработка головы",
+            "Общее время наработки, которое запишется в EEPROM головы, часы.\n"
+            "По умолчанию 0 — новая голова.",
+            parent=self.root, initialvalue=0, minvalue=0,
+            maxvalue=head89.RUNTIME_MAX_MIN // 60)
+        return None if hours is None else hours * 60
+
     def do_all(self):
         if self.product.get() == "head":
+            if self.busy or not self.dev:
+                return
+            runtime = 0
+            if self.images.get("head") is not None:      # без файла job сам сообщит об ошибке
+                runtime = self.ask_runtime()
+                if runtime is None:
+                    self.log("Прошивка головы отменена: наработка не задана", "warn")
+                    return
+
             def job(product, img, charge, log, progress):
                 self._need_image(img)
-                head89.program(self.dev, img[0], img[1], log, progress, self.confirm)
+                head89.program(self.dev, img, runtime, log, progress, self.confirm)
             self.run("Прошивка головы", job, counted=False, ok_text="ПРОШИТО")
             return
 
