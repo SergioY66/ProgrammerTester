@@ -18,7 +18,9 @@ EEPROM_SIZE = 0x800
 FLASH_PAGE = 64
 EEPROM_PAGE = 32
 SIG_SIZE = 64
-SIGNATURE = bytes([0x1E, 0x73, 0x01])
+# По даташиту у AT89S8253 в сигнатуре только 2 байта (1E 73); третий не определён
+# и читается как FF, поэтому сравниваем только эти два.
+SIGNATURE = bytes([0x1E, 0x73])
 
 # EEPROM головы формирует эта программа целиком. Раскладка — по прошивке головы
 # (zoomlamp-head-firmware-new/v2-with-chip/src/store.c и chiplist.c):
@@ -150,7 +152,7 @@ def describe_fuses(f: int) -> str:
 
 def _open(dev: Device, log):
     mode, sig = dev.isp_open()
-    if sig != SIGNATURE:
+    if bytes(sig[:len(SIGNATURE)]) != SIGNATURE:
         dev.isp_close()
         raise Abort(f"Сигнатура {hexs(sig)} — не AT89S8253 ({hexs(SIGNATURE)})")
     log(f"AT89S8253 ({hexs(sig)}), SPI режим {mode}")
