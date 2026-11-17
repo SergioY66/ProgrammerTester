@@ -69,14 +69,18 @@ uint8_t isp_open(uint8_t *out) {
   PORTB &= ~(_BV(SCK_BIT) | _BV(MOSI_BIT));
   DDRB  |= _BV(SCK_BIT) | _BV(MOSI_BIT);           // SCK = 0 до подъёма RST
   for (uint8_t mode = 0; mode < 2; mode++) {
+    // SS (D10 = RST) — выходом ДО включения SPI: иначе при SS-входе, прижатом
+    // подтяжкой головы к нулю, срабатывает Mode Fault, MSTR сбрасывается,
+    // SPI становится ведомым и xfer() ждёт SPIF вечно (Nano «замирает»).
+    rst_low();
     SPCR = _BV(SPE) | _BV(MSTR) | _BV(SPR1) | _BV(SPR0) | (mode ? _BV(CPHA) : 0);
     SPSR = 0;
-    rst_low();
     _delay_ms(10);
     rst_high();
     _delay_ms(50);
     cmd4(0xAC, 0x53, 0x00, 0x00);                  // Programming Enable
-    // Сигнатура 1E 73 01 — по 0x30 (AT89S8253); на всякий случай и по 0x00
+    // Сигнатура 1E 73 — по 0x30 (AT89S8253; третий байт не определён, читается FF);
+    // на всякий случай и по 0x00
     for (uint8_t base = 0x30;; base = 0x00) {
       if (read_byte(ISP_ATMEL, base) == 0x1E) {
         out[0] = mode;
