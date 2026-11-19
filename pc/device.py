@@ -28,14 +28,21 @@ CMD_ISP_WRITE = 0x42
 CMD_ISP_ERASE = 0x43
 CMD_ISP_CLOSE = 0x44
 CMD_ISP_READ_BLOCK = 0x45
+CMD_ISP_WRITE_PART = 0x46
+CMD_ISP_LOCK = 0x47
+CMD_ISP_WRITE_BYTE = 0x48
 CMD_SNIFF = 0x50
 
-# Области памяти AT89S8253 (firmware/include/isp89.h)
+# Области памяти AT89 (firmware/include/isp89.h)
 ISP_CODE, ISP_DATA, ISP_ATMEL, ISP_USER, ISP_LOCK, ISP_FUSES = range(6)
+
+# Типы чипов для isp_open(force=…) — у закрытого от чтения сигнатура не читается
+ISP_DEV_8253, ISP_DEV_S52 = 1, 2
 
 ST_OK = 0
 ST_UPDI_LOCKED = 15
 ST_OW_DIFF = 32
+ST_ISP_NOSIG = 42
 
 STATUS_TEXT = {
     1: "ошибка пакета",
@@ -54,8 +61,9 @@ STATUS_TEXT = {
     30: "чип не ответил на сброс (нет импульса присутствия)",
     31: "линия 1-Wire прижата к нулю",
     32: "два чтения чипа не совпали",
-    40: "AT89 не отвечает по ISP — проверьте прищепку, питание головы и кварц",
+    40: "AT89 не отвечает по ISP — проверьте прищепку, питание и кварц",
     41: "ISP: режим программирования не открыт",
+    42: "AT89: сигнатура не опознана — чип закрыт от чтения или не в режиме программирования",
 }
 
 
@@ -64,6 +72,17 @@ class DeviceError(Exception):
         self.status = status
         text = STATUS_TEXT.get(status, f"код {status}")
         super().__init__(f"{what}: {text}" if what else text)
+
+
+class IspSignatureUnknown(Exception):
+    """Сигнатура не опознана: (прочитанная сигнатура, байт lock, ответ на Enable).
+    Тип выбирает оператор."""
+
+    def __init__(self, sig: bytes, lock: int, enable: int = 0xFF):
+        self.sig = sig
+        self.lock = lock
+        self.enable = enable
+        super().__init__(f"сигнатура {sig.hex(' ').upper()} не опознана")
 
 
 def list_ports():
@@ -188,12 +207,25 @@ class Device:
             raise DeviceError(status, "Тест чипа")
         return status, data[:8], data[8:]
 
-    # --- ISP AT89S8253 ---
+    # --- ISP AT89 (8253 / S52) ---
 
-    def isp_open(self):
-        """(режим SPI, сигнатура[3])."""
-        d = self._cmd(CMD_ISP_OPEN, what="Подключение ISP")
-        return d[0], d[1:4]
+    def isp_open(self, force: int = 0):
+        """(режим SPI, сигнатура[3], тип, байт lock, ответ на Programming Enable).
+
+        force — ISP_DEV_8253/ISP_DEV_S52, если сигнатура не читается (чип закрыт).
+        Исключение IspSignatureUnknown — сигнатуру опознать не удалось.
+        Ответ на Enable есть только у прошивки Nano v7+; на старой — None.
+        """
+        status, data = self._transact(CMD_ISP_OPEN, bytes([force]), timeout=5.0)
+        if status == ST_ISP_NOSIG:
+            raise IspSignatureUnknown(bytes(data[1:4]), data[5], self._enable(data))
+        if status != ST_OK:
+            raise DeviceError(status, "Подключение ISP")
+        return (data[0], bytes(data[1:4]), data[4], data[5], self._enable(data))
+
+    def _enable(self, data: bytes):
+        """Ответ на Programming Enable; None — прошивка Nano его не присылает (до v7)."""
+        return data[6] if self.version >= 7 and len(data) > 6 else None
 
     def isp_close(self):
         self._cmd(CMD_ISP_CLOSE)
@@ -217,7 +249,8 @@ class Device:
             status, data = self._receive(CMD_ISP_READ_BLOCK)
             if status != ST_OK:
                 raise DeviceError(status, f"Чтение ISP 0x{addr + len(out):04X}")
-            if len(data) != page:
+            # страница больше 128 Б (S52) приходит двумя ответами
+            if not data or len(out) + len(data) > n:
                 raise IOError("Nano прислала страницу неверной длины")
             out += data
             if progress:
@@ -227,6 +260,19 @@ class Device:
     def isp_write_page(self, space: int, addr: int, data: bytes):
         self._cmd(CMD_ISP_WRITE, bytes([space, addr & 0xFF, addr >> 8]) + data,
                   what=f"Запись ISP 0x{addr:04X}")
+
+    def isp_write_part(self, space: int, addr: int, part: int, data: bytes):
+        """Страница S52 (256 Б) двумя пакетами: part 0 — первая половина, 1 — вторая."""
+        self._cmd(CMD_ISP_WRITE_PART, bytes([space, addr & 0xFF, addr >> 8, part]) + data,
+                  what=f"Запись ISP 0x{addr:04X}")
+
+    def isp_write_byte(self, space: int, addr: int, value: int):
+        """Запись одного байта (Byte Mode, команда 0x40) — прошивка Nano v9+."""
+        self._cmd(CMD_ISP_WRITE_BYTE, bytes([space, addr & 0xFF, addr >> 8, value]),
+                  what=f"Запись байта 0x{addr:04X}")
+
+    def isp_lock(self, level: int):
+        self._cmd(CMD_ISP_LOCK, bytes([level]), what="Запись lock")
 
     def isp_erase(self):
         self._cmd(CMD_ISP_ERASE, timeout=5.0, what="Стирание AT89")

@@ -22,7 +22,7 @@ SETTINGS = os.path.join(HERE, "settings.json")
 LOG_DIR = os.path.join(HERE, "logs")
 
 SNIFF_DIR = os.path.join(HERE, "sniffer")
-PRODUCTS = {"card": "Карта Flash", "chip": "Чип Zoom", "head": "Голова (AT89S8253)"}
+PRODUCTS = {"card": "Карта Flash", "chip": "Чип Zoom", "head": "AT89 (8253 / S52)"}
 
 # Nano держит режим «управление с ПК», пока раз в 5 с приходит хоть один пакет
 KEEPALIVE_MS = 2000
@@ -231,8 +231,9 @@ class App:
         flash = head89.load_image(path, head89.FLASH_SIZE, "Flash")
         self.images["head"] = flash
         self.lbl_file.config(
-            text=f"Flash {head89.used(flash)} Б · EEPROM формирует программа: коэффициенты "
-                 f"{head89.COEF_LO}/{head89.COEF_MID}/{head89.COEF_HI}, наработка, новый ключ",
+            text=f"Flash {head89.used(flash)} Б · тип чипа определяется по сигнатуре; "
+                 "у AT89S8253 EEPROM формирует программа (коэффициенты, наработка, новый ключ), "
+                 "у AT89S52 — только Flash",
             foreground="black")
 
     def load_image(self, path):
@@ -302,8 +303,23 @@ class App:
                     self.prog["value"] = args[0]
                 elif kind == "ask":
                     text, answer, event = args
-                    answer.append(messagebox.askyesno("Подтверждение", text, icon="warning", default="no"))
-                    event.set()
+                    try:
+                        answer.append(messagebox.askyesno("Подтверждение", text,
+                                                          icon="warning", default="no"))
+                    finally:
+                        event.set()
+                elif kind == "choose":
+                    text, yes_text, no_text, answer, event = args
+                    try:
+                        answer.append(self._choose_dialog(text, yes_text, no_text))
+                    finally:
+                        event.set()
+                elif kind == "int":
+                    title, text, kwargs, answer, event = args
+                    try:
+                        answer.append(simpledialog.askinteger(title, text, parent=self.root, **kwargs))
+                    finally:
+                        event.set()
                 elif kind == "done":
                     ok, text, counted = args
                     self.set_result(ok, text)
@@ -314,7 +330,12 @@ class App:
                     self.update_buttons()
         except queue.Empty:
             pass
-        self.root.after(50, self.poll)
+        except Exception as e:
+            # Очередь не должна умирать: иначе фоновый поток ждёт ответа вечно,
+            # кнопки остаются выключенными и окно не закрывается.
+            self.log(f"Внутренняя ошибка интерфейса: {e!r}", "err")
+        finally:
+            self.root.after(50, self.poll)
 
     def run(self, title, job, counted=True, ok_text="ГОДНО"):
         if self.busy or not self.dev:
@@ -350,11 +371,74 @@ class App:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _wait_answer(self, event):
+        """Ждёт ответа оператора, раз в секунду подавая Nano признак жизни.
+
+        Ответ оператор выбирает сколько ему нужно (в журнале — 8 с), а Nano без
+        пакетов 5 с уходит в автономный режим: снимает линии и теряет открытую
+        ISP-сессию — следующее стирание получает «режим программирования не
+        открыт». PING ничего не сбрасывает и ISP-сессию не трогает, а порт в это
+        время свободен: фоновый поток ждёт здесь ответа, основной занят диалогом.
+        """
+        dev = self.dev
+        lost = False
+        while not event.wait(1.0):
+            try:
+                dev.ping()
+            except Exception as e:
+                if not lost:                       # порт мог отвалиться — не спамим
+                    lost = True
+                    self.q.put(("log", f"Связь с Nano потеряна: {e}", "err"))
+
     def confirm(self, text) -> bool:
         """Вопрос «Да / Нет» из фонового потока: окно показывает poll()."""
         answer, event = [], threading.Event()
         self.q.put(("ask", text, answer, event))
-        event.wait()
+        self._wait_answer(event)
+        return bool(answer[0]) if answer else False     # окно не дало ответа — «Нет»
+
+    def choose_type(self, text, yes_text, no_text):
+        """Выбор типа чипа из фонового потока. True — «Да», False — «Нет», None — отмена."""
+        answer, event = [], threading.Event()
+        self.q.put(("choose", text, yes_text, no_text, answer, event))
+        self._wait_answer(event)
+        return answer[0] if answer else None
+
+    def ask_integer(self, title, text, **kwargs):
+        """Целое число из фонового потока (simpledialog — только в главном)."""
+        answer, event = [], threading.Event()
+        self.q.put(("int", title, text, kwargs, answer, event))
+        self._wait_answer(event)
+        return answer[0] if answer else None
+
+    def _choose_dialog(self, text, yes_text, no_text):
+        """Окно выбора из двух с отменой. Своё, потому что у askyesnocancel нет
+        параметров для подписей кнопок, а с yes=/no= он падает (TclError)."""
+        answer = [None]
+        win = tk.Toplevel(self.root)
+        win.title("Выбор типа чипа")
+        win.transient(self.root)
+        win.resizable(False, False)
+        ttk.Label(win, text=text, justify="left", wraplength=440).pack(
+            padx=16, pady=(16, 12), anchor="w")
+        row = ttk.Frame(win)
+        row.pack(padx=16, pady=(0, 16), fill="x")
+
+        def pick(value):
+            answer[0] = value
+            win.destroy()
+
+        ttk.Button(row, text=yes_text, command=lambda: pick(True)).pack(side="left", padx=(0, 8))
+        ttk.Button(row, text=no_text, command=lambda: pick(False)).pack(side="left", padx=(0, 8))
+        ttk.Button(row, text="Отмена", command=lambda: pick(None)).pack(side="left")
+        win.protocol("WM_DELETE_WINDOW", lambda: pick(None))
+        win.bind("<Escape>", lambda e: pick(None))
+        win.grab_set()                                # модальное: остальное окно ждёт
+        win.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - win.winfo_width()) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - win.winfo_height()) // 3
+        win.geometry(f"+{max(0, x)}+{max(0, y)}")
+        self.root.wait_window(win)
         return answer[0]
 
     def _need_image(self, img):
@@ -368,30 +452,24 @@ class App:
             ops.test_chip(self.dev, log, charge)
 
     def ask_runtime(self):
-        """Наработка для EEPROM головы, минуты; None — оператор отменил прошивку."""
-        hours = simpledialog.askinteger(
+        """Наработка для EEPROM головы, минуты; None — оператор отменил прошивку.
+
+        Спрашивается из фонового потока и только для AT89S8253: у S52 EEPROM нет.
+        """
+        hours = self.ask_integer(
             "Наработка головы",
             "Общее время наработки, которое запишется в EEPROM головы, часы.\n"
             "По умолчанию 0 — новая голова.",
-            parent=self.root, initialvalue=0, minvalue=0,
-            maxvalue=head89.RUNTIME_MAX_MIN // 60)
+            initialvalue=0, minvalue=0, maxvalue=head89.RUNTIME_MAX_MIN // 60)
         return None if hours is None else hours * 60
 
     def do_all(self):
         if self.product.get() == "head":
-            if self.busy or not self.dev:
-                return
-            runtime = 0
-            if self.images.get("head") is not None:      # без файла job сам сообщит об ошибке
-                runtime = self.ask_runtime()
-                if runtime is None:
-                    self.log("Прошивка головы отменена: наработка не задана", "warn")
-                    return
-
             def job(product, img, charge, log, progress):
                 self._need_image(img)
-                head89.program(self.dev, img, runtime, log, progress, self.confirm)
-            self.run("Прошивка головы", job, counted=False, ok_text="ПРОШИТО")
+                head89.program(self.dev, img, log, progress, self.confirm,
+                               choose_type=self.choose_type, ask_runtime=self.ask_runtime)
+            self.run("Прошивка AT89", job, counted=False, ok_text="ПРОШИТО")
             return
 
         def job(product, img, charge, log, progress):
@@ -414,7 +492,7 @@ class App:
     def do_status(self):
         def job(product, img, charge, log, progress):
             if product == "head":
-                head89.read_status(self.dev, log)
+                head89.read_status(self.dev, log, self.choose_type)
             else:
                 ops.read_status(self.dev, log)
         self.run("Чтение состояния", job, counted=False, ok_text="Прочитано")
@@ -422,10 +500,10 @@ class App:
     def do_dump(self):
         def job(product, img, charge, log, progress):
             if product == "head":
-                head89.dump(self.dev, log, progress)
+                head89.dump(self.dev, log, progress, self.choose_type)
             else:
                 ops.dump_chip(self.dev, log, charge)
-        self.run("Дамп головы" if self.product.get() == "head" else "Дамп чипа",
+        self.run("Дамп AT89" if self.product.get() == "head" else "Дамп чипа",
                  job, counted=False, ok_text="ДАМП СНЯТ")
 
     def _sniff_folder(self) -> str:
@@ -487,7 +565,13 @@ class App:
 
     def on_close(self):
         if self.busy:
-            return
+            # Не блокируем закрытие молча: спрашиваем и, если да, выходим.
+            if not messagebox.askyesno(
+                    "Идёт операция",
+                    "Идёт операция с изделием. Прервать и закрыть программу?\n\n"
+                    "Прошивка может остаться незавершённой.",
+                    icon="warning", default="no", parent=self.root):
+                return
         self.save_settings()
         if self.dev:
             self.dev.close()
