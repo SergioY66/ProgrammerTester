@@ -23,7 +23,7 @@
 #include "display.h"
 #include "standalone.h"
 
-#define FW_VERSION 5
+#define FW_VERSION 9
 #define PC_TIMEOUT_MS 5000
 
 static bool pc_mode;
@@ -57,12 +57,15 @@ enum : uint8_t {
   CMD_UPDI_CLOSE  = 0x18,
   CMD_CARD_TEST   = 0x20,   // → 2 байта
   CMD_CHIP_TEST   = 0x30,   // charge_ms16 → rom[8] + mem[0x90]
-  CMD_ISP_OPEN    = 0x40,   // → режим SPI, сигнатура[3]
+  CMD_ISP_OPEN    = 0x40,   // force → режим SPI, сигнатура[3], тип, lock
   CMD_ISP_READ    = 0x41,   // space, addr16, n → data[n]
-  CMD_ISP_WRITE   = 0x42,   // space, addr16, data — страница Flash (64) / EEPROM (32)
+  CMD_ISP_WRITE   = 0x42,   // space, addr16, data — страница Flash / EEPROM (до 128 Б)
   CMD_ISP_ERASE   = 0x43,   // стирание Flash + EEPROM + lock
   CMD_ISP_CLOSE   = 0x44,
   CMD_ISP_READ_BLOCK = 0x45, // space, addr16, len16 → len/page ответов подряд, по странице
+  CMD_ISP_WRITE_PART = 0x46, // space, addr16, часть 0/1, data — страница S52 (256 Б) двумя пакетами
+  CMD_ISP_LOCK    = 0x47,   // уровень 2/3 — запись lock-битов
+  CMD_ISP_WRITE_BYTE = 0x48, // space, addr16, data — запись одного байта (Byte Mode)
   CMD_SNIFF       = 0x50,   // сниффер 1-Wire: ответ ST_OK, затем поток записей (sniff.h) до любого байта от ПК
 };
 
@@ -109,8 +112,11 @@ static void handle(uint8_t cmd, const uint8_t *p, uint8_t len) {
   case CMD_ISP_OPEN:    show("HEAD AT89", "CONNECT"); break;
   case CMD_ISP_READ:
   case CMD_ISP_READ_BLOCK: show("HEAD AT89", "READ"); break;
-  case CMD_ISP_WRITE:   show("HEAD AT89", "WRITE"); break;
+  case CMD_ISP_WRITE:
+  case CMD_ISP_WRITE_PART:
+  case CMD_ISP_WRITE_BYTE: show("HEAD AT89", "WRITE"); break;
   case CMD_ISP_ERASE:   show("HEAD AT89", "ERASE"); break;
+  case CMD_ISP_LOCK:    show("HEAD AT89", "LOCK"); break;
   case CMD_ISP_CLOSE:   show("HEAD AT89", "DONE"); break;
   case CMD_SNIFF:       show("SNIFFER", "1-WIRE"); break;
   }
@@ -176,8 +182,10 @@ static void handle(uint8_t cmd, const uint8_t *p, uint8_t len) {
   }
 
   case CMD_ISP_OPEN:
-    st = isp_open(tx_buf);
-    reply(st, tx_buf, st == ST_OK ? 4 : 0);
+    st = isp_open(len >= 1 ? p[0] : 0, tx_buf);
+    // При ST_ISP_NOSIG тоже отдаём прочитанное: ПК покажет оператору обе
+    // сигнатуры и байт lock, чтобы тот выбрал тип чипа.
+    reply(st, tx_buf, (st == ST_OK || st == ST_ISP_NOSIG) ? 7 : 0);
     break;
 
   case CMD_ISP_READ:
@@ -187,15 +195,20 @@ static void handle(uint8_t cmd, const uint8_t *p, uint8_t len) {
     break;
 
   case CMD_ISP_READ_BLOCK: {
-    // Flash/EEPROM блоком: одна команда — много ответов, без ожидания ПК между страницами
+    // Flash/EEPROM блоком: одна команда — много ответов, без ожидания ПК между страницами.
+    // Страница целиком читается в tx_buf (до 256 Б = его размер), а отдаётся
+    // ответами не длиннее 128 Б: длина ответа — один байт.
     if (len != 5 || p[0] > ISP_DATA) { reply(ST_BAD_ARGS, 0, 0); break; }
-    uint8_t page = p[0] == ISP_CODE ? 64 : 32;
+    uint16_t page = isp_page_size(p[0]);
     uint16_t addr = get16(p + 1), total = get16(p + 3);
-    if (!total || (addr | total) & (page - 1)) { reply(ST_BAD_ARGS, 0, 0); break; }
+    if (!page || !total || (addr | total) & (page - 1)) { reply(ST_BAD_ARGS, 0, 0); break; }
     for (; total; total -= page, addr += page) {
       st = isp_read(p[0], addr, tx_buf, page);
       if (st != ST_OK) { reply(st, 0, 0); break; }
-      reply(ST_OK, tx_buf, page, total == page);
+      for (uint16_t off = 0; off < page; off += 128) {
+        uint8_t n = page - off > 128 ? 128 : page - off;
+        reply(ST_OK, tx_buf + off, n, total == page && off + n == page);
+      }
     }
     break;
   }
@@ -203,6 +216,21 @@ static void handle(uint8_t cmd, const uint8_t *p, uint8_t len) {
   case CMD_ISP_WRITE:
     if (len < 4) { reply(ST_BAD_ARGS, 0, 0); break; }
     reply(isp_write_page(p[0], get16(p + 1), p + 3, len - 3), 0, 0);
+    break;
+
+  case CMD_ISP_WRITE_PART:
+    if (len < 5) { reply(ST_BAD_ARGS, 0, 0); break; }
+    reply(isp_write_part(p[0], get16(p + 1), p[3], p + 4, len - 4), 0, 0);
+    break;
+
+  case CMD_ISP_LOCK:
+    if (len != 1) { reply(ST_BAD_ARGS, 0, 0); break; }
+    reply(isp_lock(p[0]), 0, 0);
+    break;
+
+  case CMD_ISP_WRITE_BYTE:
+    if (len != 4) { reply(ST_BAD_ARGS, 0, 0); break; }
+    reply(isp_write_byte(p[0], get16(p + 1), p[3]), 0, 0);
     break;
 
   case CMD_ISP_ERASE:
